@@ -18,8 +18,8 @@ GASのスクリプトプロパティで以下を設定:
 - `SEARCH_QUERIES`: Gmail検索クエリ（改行区切り）
 
 ### SEARCH_QUERIES設定例
->(subject:"ご利用のお知らせ" from:"info@example.jp")
->(subject:"決済完了" from:"payment@example.com")
+>(subject:"ご利用のお知らせ" from:"info(@)example.jp")
+>(subject:"決済完了" from:"payment(@)example.com")
 
 ## 使い方
 1. GASで新プロジェクト作成
