@@ -23,7 +23,9 @@ function callOpenAIApi(prompt) {
   // スクリプトプロパティからOpenAIのAPIキーを取得
   const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
   if (!apiKey) {
-    Logger.log('ERROR: OpenAI API key not set in Script Properties (OPENAI_API_KEY)');
+    logError('OpenAI API key not set in Script Properties', {
+      property: 'OPENAI_API_KEY'
+    });
     return null;
   }
 
@@ -57,25 +59,95 @@ function callOpenAIApi(prompt) {
   };
 
   try {
+    logInfo('Calling OpenAI API');
     const response = UrlFetchApp.fetch(url, options);
-    if (response.getResponseCode() !== 200) {
-      const errorPreview = response.getContentText().substring(0, 100);
-      Logger.log(`ERROR: OpenAI API returned code ${response.getResponseCode()} - ${errorPreview}...`);
+    const responseCode = response.getResponseCode();
+
+    // HTTPステータスコード別のエラーハンドリング
+    if (responseCode !== 200) {
+      const errorBody = response.getContentText();
+
+      switch (responseCode) {
+        case 400:
+          logError('OpenAI API: Bad Request', {
+            statusCode: responseCode,
+            message: 'Invalid request format or parameters'
+          });
+          break;
+
+        case 401:
+          logError('OpenAI API: Unauthorized', {
+            statusCode: responseCode,
+            message: 'Invalid or missing API key'
+          });
+          break;
+
+        case 403:
+          logError('OpenAI API: Forbidden', {
+            statusCode: responseCode,
+            message: 'API key lacks necessary permissions'
+          });
+          break;
+
+        case 429:
+          logWarn('OpenAI API: Rate Limit Exceeded', {
+            statusCode: responseCode,
+            message: 'Too many requests, retry later'
+          });
+          break;
+
+        case 500:
+        case 502:
+        case 503:
+        case 504:
+          logError('OpenAI API: Server Error', {
+            statusCode: responseCode,
+            message: 'Service temporarily unavailable'
+          });
+          break;
+
+        default:
+          logError('OpenAI API: Unexpected Error', {
+            statusCode: responseCode,
+            errorPreview: errorBody.substring(0, 200)
+          });
+      }
+
       return null;
     }
 
     const json = JSON.parse(response.getContentText());
+
     if (!json.choices || json.choices.length === 0) {
-      Logger.log('WARN: No choices in OpenAI response');
+      logWarn('No choices in OpenAI response', {
+        hasError: !!json.error
+      });
       return null;
     }
 
     // ChatGPTの応答は choices[0].message.content に入っている
     const content = json.choices[0].message.content.trim();
+    logInfo('OpenAI response received', {
+      contentLength: content.length
+    });
+
     return content;
 
   } catch (error) {
-    Logger.log('ERROR: OpenAI API Error - ' + error);
+    // ネットワークエラーやタイムアウト
+    if (error.message && error.message.includes('timeout')) {
+      logError('OpenAI API: Request Timeout', {
+        error: error.toString()
+      });
+    } else if (error.message && error.message.includes('DNS')) {
+      logError('OpenAI API: Network Error (DNS)', {
+        error: error.toString()
+      });
+    } else {
+      logError('OpenAI API: Unexpected Exception', {
+        error: error.toString()
+      });
+    }
     return null;
   }
 }

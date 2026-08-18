@@ -4,15 +4,78 @@
  **************************************/
 
 /**
+ * セル値の数式インジェクション無害化
+ *
+ * Google Sheets は = + - @ で始まる文字列を数式として評価する。
+ * LLM応答由来のデータにこれらが含まれると、=IMPORTDATA() 等で
+ * 外部へHTTPリクエストが飛び、同シート内の他の取引データが漏洩しうる。
+ * タブ(0x09)・CR(0x0D)・LF(0x0A) も先頭に来るとセル解釈が変わるため対象。
+ *
+ * @param {*} value - セルに書き込む値
+ * @returns {*} - 無害化済みの値（文字列以外はそのまま返す）
+ */
+function sanitizeCellValue(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  if (/^[=+\-@\t\r\n]/.test(value)) {
+    return "'" + value;
+  }
+  return value;
+}
+
+/**
+ * ロック取得のタイムアウト時間（ミリ秒）
+ * 短縮して次回リトライに委ねる設計
+ */
+const LOCK_TIMEOUT_MS = 10000;
+
+/**
  * 指定されたスプレッドシートにデータを追記する関数
  * @param {Spreadsheet} spreadsheet  - SpreadsheetApp.openById() で取得したスプレッドシートオブジェクト
  * @param {Object} data - { store, date, amount }
  */
 function writeToSheet(spreadsheet, data) {
+  // スクリプトロックを取得（スタンドアロンスクリプト対応）
+  // Note: getDocumentLock()はContainer-boundスクリプト専用でnullを返す場合がある
+  const lock = LockService.getScriptLock();
+
+  try {
+    // ロック取得を試行（タイムアウト付き）
+    lock.waitLock(LOCK_TIMEOUT_MS);
+
+    logDebug('Script lock acquired for writeToSheet');
+
+    // ロック取得後の実際の書き込み処理
+    writeToSheetInternal(spreadsheet, data);
+
+  } catch (lockError) {
+    logError('Failed to acquire script lock', {
+      error: lockError.toString(),
+      timeout: LOCK_TIMEOUT_MS
+    });
+    // タイムアウト時はthrowせずreturnで次回リトライに委ねる
+    return;
+
+  } finally {
+    // ロック解放
+    lock.releaseLock();
+    logDebug('Script lock released');
+  }
+}
+
+/**
+ * 実際のシート書き込み処理（ロック保護下で実行）
+ * @param {Spreadsheet} spreadsheet - SpreadsheetApp.openById() で取得したスプレッドシートオブジェクト
+ * @param {Object} data - { store, date, amount }
+ */
+function writeToSheetInternal(spreadsheet, data) {
   // 1. 日付から "YYYY/MM" を作ってシート名にする想定
   const yearMonthMatch = data.date.match(YEAR_MONTH_PATTERN);
   if (!yearMonthMatch) {
-    Logger.log('Date format not recognized:', data.date);
+    logError('Date format not recognized for sheet name', {
+      date: data.date
+    });
     return;
   }
   const year = yearMonthMatch[1];
@@ -60,13 +123,24 @@ function writeToSheet(spreadsheet, data) {
     });
 
     if (isDuplicate) {
-      Logger.log('Duplicate entry found. Skipping write:', data);
+      // Privacy Note: Log date only for debugging; store/amount are PII
+      logWarn('Duplicate entry found, skipping write', {
+        date: data.date,
+        sheetName: sheetName
+      });
       return;
     }
   }
 
-  // 5. 重複がなければ書き込み
-  sheet.appendRow([data.store, data.date, data.amount]);
+  // 5. 重複がなければ書き込み（数式インジェクション対策）
+  sheet.appendRow([
+    sanitizeCellValue(data.store),
+    sanitizeCellValue(data.date),
+    sanitizeCellValue(data.amount)
+  ]);
+  logDebug('Data written to sheet', {
+    sheetName: sheetName
+  });
 
   // 6. 金額セルの表示形式を数値扱いにしたい場合は、こんな設定を追加してもいい
   //    ただし今は文字列で"xxxx円"として書き込んでるから無理に変換する必要は無い

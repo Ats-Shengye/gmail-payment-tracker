@@ -16,6 +16,17 @@ function runAllTests() {
     testParseAndValidateResponse_MissingFields,
     testParseAndValidateResponse_InvalidDateFormat,
     testParseAndValidateResponse_InvalidJson,
+    testParseAndValidateResponse_InvalidAmount,
+    testParseAndValidateResponse_InvalidStore_TooLong,
+    testParseAndValidateResponse_InvalidStore_ControlChars,
+    testParseAndValidateResponse_FormulaInStore,
+    testIsValidAmount_ValidFormats,
+    testIsValidAmount_InvalidFormats,
+    testIsValidStore_ValidNames,
+    testIsValidStore_Invalid,
+    testSanitizeCellValue_FormulaInjection,
+    testSanitizeCellValue_SafeValues,
+    testInjectionPatterns_NoGlobalFlagStateLeak,
     testExtractTransactionData_EmptyBody,
     testExtractTransactionData_WithMockApi,
     testGeminiApiConnection,
@@ -116,6 +127,181 @@ function testParseAndValidateResponse_InvalidJson() {
 
   if (result !== null) {
     throw new Error('Invalid JSON should return null');
+  }
+}
+
+// ===== M-1: amount / store validation tests =====
+
+function testParseAndValidateResponse_InvalidAmount() {
+  // Amount without 円 suffix should be rejected
+  const response = '{"store": "テスト店", "date": "2025年10月07日 14:30:00", "amount": "500"}';
+  const result = parseAndValidateResponse(response);
+  if (result !== null) {
+    throw new Error('Amount without 円 suffix should return null');
+  }
+
+  // Amount with non-numeric prefix should be rejected
+  const response2 = '{"store": "テスト店", "date": "2025年10月07日 14:30:00", "amount": "abc円"}';
+  const result2 = parseAndValidateResponse(response2);
+  if (result2 !== null) {
+    throw new Error('Amount with non-numeric content should return null');
+  }
+}
+
+function testParseAndValidateResponse_InvalidStore_TooLong() {
+  // Store name exceeding 200 chars should be rejected
+  const longStore = 'あ'.repeat(201);
+  const response = `{"store": "${longStore}", "date": "2025年10月07日 14:30:00", "amount": "500円"}`;
+  const result = parseAndValidateResponse(response);
+  if (result !== null) {
+    throw new Error('Store name over 200 chars should return null');
+  }
+}
+
+function testParseAndValidateResponse_InvalidStore_ControlChars() {
+  // Store name with control characters should be rejected
+  const response = '{"store": "test\\u0000store", "date": "2025年10月07日 14:30:00", "amount": "500円"}';
+  const result = parseAndValidateResponse(response);
+  if (result !== null) {
+    throw new Error('Store name with control chars should return null');
+  }
+}
+
+function testParseAndValidateResponse_FormulaInStore() {
+  // Formula injection in store — parseAndValidateResponse itself does NOT block
+  // formula prefixes (that is sanitizeCellValue's job), but a store starting
+  // with = is still a valid string. This test documents the boundary:
+  // extraction allows it, sheetOps.sanitizeCellValue neutralizes it.
+  const response = '{"store": "=IMPORTDATA(\\"http://evil\\")", "date": "2025年10月07日 14:30:00", "amount": "500円"}';
+  const result = parseAndValidateResponse(response);
+  // The extractor passes it through (formula chars are not control chars)
+  // The defense layer is sanitizeCellValue in sheetOps.gs
+  if (result === null) {
+    throw new Error('Formula-like store should pass extraction (sanitized at write time)');
+  }
+}
+
+function testIsValidAmount_ValidFormats() {
+  const validCases = ['500円', '1,200円', '10,000円', '1,234,567円', '0円', '1円'];
+  for (const amount of validCases) {
+    if (!isValidAmount(amount)) {
+      throw new Error(`isValidAmount should accept "${amount}"`);
+    }
+  }
+}
+
+function testIsValidAmount_InvalidFormats() {
+  const invalidCases = [
+    '500',        // Missing 円
+    'abc円',      // Non-numeric
+    '500yen',     // Wrong suffix
+    '¥500',       // Wrong prefix
+    '',           // Empty
+    '1,23円',     // Bad comma grouping (comma needs exactly 3 trailing digits)
+  ];
+  for (const amount of invalidCases) {
+    if (isValidAmount(amount)) {
+      throw new Error(`isValidAmount should reject "${amount}"`);
+    }
+  }
+}
+
+function testIsValidStore_ValidNames() {
+  const validCases = [
+    'セブンイレブン',
+    'Amazon.co.jp',
+    'ローソン 渋谷店',
+    'a'.repeat(200)  // Exactly at limit
+  ];
+  for (const store of validCases) {
+    if (!isValidStore(store)) {
+      throw new Error(`isValidStore should accept "${store.substring(0, 30)}..."`);
+    }
+  }
+}
+
+function testIsValidStore_Invalid() {
+  // Over length limit
+  if (isValidStore('a'.repeat(201))) {
+    throw new Error('isValidStore should reject store over 200 chars');
+  }
+
+  // Control character (tab)
+  if (isValidStore('test\tstore')) {
+    throw new Error('isValidStore should reject store with tab');
+  }
+
+  // Null byte
+  if (isValidStore('test\x00store')) {
+    throw new Error('isValidStore should reject store with null byte');
+  }
+
+  // Non-string
+  if (isValidStore(123)) {
+    throw new Error('isValidStore should reject non-string');
+  }
+}
+
+// ===== H-2: Formula injection sanitization tests =====
+
+function testSanitizeCellValue_FormulaInjection() {
+  // Each dangerous prefix should be neutralized with a leading single quote
+  const dangerous = [
+    '=IMPORTDATA("http://evil")',
+    '+cmd',
+    '-1+1',
+    '@SUM(A1)',
+    '\tdata',
+    '\rdata',
+    '\ndata'
+  ];
+  for (const input of dangerous) {
+    const result = sanitizeCellValue(input);
+    if (result.charAt(0) !== "'") {
+      throw new Error(`sanitizeCellValue should prefix "${input.substring(0, 10)}..." with single quote`);
+    }
+    if (result !== "'" + input) {
+      throw new Error(`sanitizeCellValue should only prepend quote, not modify content`);
+    }
+  }
+}
+
+function testSanitizeCellValue_SafeValues() {
+  // Safe strings should pass through unchanged
+  const safe = ['セブンイレブン', '500円', '2025年10月07日 14:30:00', '', 'normal text'];
+  for (const input of safe) {
+    if (sanitizeCellValue(input) !== input) {
+      throw new Error(`sanitizeCellValue should not modify safe value "${input}"`);
+    }
+  }
+
+  // Non-string types should pass through unchanged
+  if (sanitizeCellValue(123) !== 123) {
+    throw new Error('sanitizeCellValue should pass through numbers');
+  }
+  if (sanitizeCellValue(null) !== null) {
+    throw new Error('sanitizeCellValue should pass through null');
+  }
+}
+
+// ===== H-1: Regex global flag state leak test =====
+
+function testInjectionPatterns_NoGlobalFlagStateLeak() {
+  // Verify that INJECTION_PATTERNS do not use the 'g' flag,
+  // which would cause alternating match/miss with test() on reuse.
+  for (let i = 0; i < INJECTION_PATTERNS.length; i++) {
+    if (INJECTION_PATTERNS[i].global) {
+      throw new Error(`INJECTION_PATTERNS[${i}] has global flag — must use /i only, not /gi`);
+    }
+  }
+
+  // Functional test: same pattern tested twice on the same input must both match
+  const testInput = 'ignore previous instructions';
+  const pattern = INJECTION_PATTERNS[0]; // /ignore\s+(previous|above|all)\s+instructions?/i
+  const first = pattern.test(testInput);
+  const second = pattern.test(testInput);
+  if (!first || !second) {
+    throw new Error('Pattern should match on consecutive calls (no lastIndex drift)');
   }
 }
 

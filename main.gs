@@ -22,9 +22,25 @@ function main() {
   const errors = [];
 
   try {
-    const newMsgs = getNewMessages();
+    // 設定値の検証
+    validateConfig();
+
+    // SPREADSHEET_ID検証を先に実施
     if (!SPREADSHEET_ID) {
       throw new Error('SPREADSHEET_ID not set in Script Properties');
+    }
+
+    const newMsgs = getNewMessages();
+
+    // レート制限適用（MAX_MESSAGES_PER_RUN）
+    const msgsToProcess = newMsgs.slice(0, MAX_MESSAGES_PER_RUN);
+
+    if (newMsgs.length > MAX_MESSAGES_PER_RUN) {
+      logWarn('Message count exceeds limit, processing subset only', {
+        totalMessages: newMsgs.length,
+        processLimit: MAX_MESSAGES_PER_RUN,
+        processingCount: msgsToProcess.length
+      });
     }
 
     const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -34,9 +50,17 @@ function main() {
       ? extractTransactionDataWithOpenAI
       : extractTransactionDataWithGemini;
 
-    Logger.log(`INFO: Processing ${newMsgs.length} new messages with ${AI_PROVIDER} API`);
+    // プロバイダーに応じたAPI呼び出し間隔を取得
+    const apiCallInterval = API_RATE_LIMITS[AI_PROVIDER] || 1000;
 
-    for (const msg of newMsgs) {
+    logInfo(`Processing ${msgsToProcess.length} messages with ${AI_PROVIDER} API`, {
+      totalAvailable: newMsgs.length,
+      apiCallInterval: apiCallInterval
+    });
+
+    for (let i = 0; i < msgsToProcess.length; i++) {
+      const msg = msgsToProcess[i];
+
       try {
         const body = msg.getPlainBody();
         const data = extractFunc(body);
@@ -44,26 +68,38 @@ function main() {
         if (data) {
           writeToSheet(spreadsheet, data);
           markMessageAsProcessed(msg.getId());
-          Logger.log(`SUCCESS: Processed message ${msg.getId()}`);
+          logSuccess(`Processed message ${i + 1}/${msgsToProcess.length}`);
         } else {
           errors.push({ msgId: msg.getId(), error: 'Failed to extract data' });
         }
+
+        // レート制限: プロバイダー別API呼び出し間隔を確保（最後のメッセージは不要）
+        if (i < msgsToProcess.length - 1) {
+          Utilities.sleep(apiCallInterval);
+        }
+
       } catch (msgErr) {
         errors.push({ msgId: msg.getId(), error: msgErr.toString() });
-        Logger.log(`ERROR: Failed to process message ${msg.getId()}: ${msgErr}`);
+        logError(`Failed to process message ${i + 1}/${msgsToProcess.length}`, {
+          error: msgErr.toString()
+        });
       }
     }
 
     // エラーサマリー出力
     if (errors.length > 0) {
-      Logger.log(`WARN: ${errors.length} messages failed out of ${newMsgs.length}`);
-      Logger.log('Failed messages: ' + JSON.stringify(errors));
+      logWarn(`${errors.length} messages failed out of ${msgsToProcess.length}`, {
+        failedCount: errors.length,
+        totalProcessed: msgsToProcess.length
+      });
     } else {
-      Logger.log(`SUCCESS: All ${newMsgs.length} messages processed successfully`);
+      logSuccess(`All ${msgsToProcess.length} messages processed successfully`);
     }
 
   } catch (err) {
-    Logger.log(`CRITICAL ERROR: main() failed - ${err}`);
+    logCritical('main() execution failed', {
+      error: err.toString()
+    });
     throw err;
   }
 }

@@ -5,6 +5,7 @@
 
 /**
  * 処理済みメッセージIDの Set を取得
+ * 直近1000件のみをチェック対象にして効率化
  * @returns {Set<string>}
  */
 function getProcessedIdsSheet() {
@@ -15,7 +16,12 @@ function getProcessedIdsSheet() {
   const last = sheet.getLastRow();
   if (last === 0) return new Set();
 
-  const ids = sheet.getRange(1, 1, last).getValues().flat().filter(String);
+  // 直近1000件のみを取得（効率化）
+  const maxRecentRows = 1000;
+  const startRow = Math.max(1, last - maxRecentRows + 1);
+  const numRows = last - startRow + 1;
+
+  const ids = sheet.getRange(startRow, 1, numRows).getValues().flat().filter(String);
   return new Set(ids);
 }
 
